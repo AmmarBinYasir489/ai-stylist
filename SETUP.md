@@ -1,9 +1,12 @@
 # AI Closet Stylist — Setup
 
-A wardrobe app that (1) auto-analyzes uploaded clothing with Groq vision, (2) has
-a Groq LLM assemble & rank complete outfits with reasons, and (3) previews each
-look layered on a mannequin. Backend is Supabase (auth + storage + Postgres +
-Edge Functions). **Your Groq key lives only in a Supabase secret — never in the browser.**
+A wardrobe app that (1) auto-analyzes uploaded clothing (one small Groq vision
+call per *new* photo — colors are measured from the pixels locally, and
+re-uploads are deduped by content hash so they cost nothing), (2) assembles &
+ranks complete outfits with a **local deterministic engine** (zero API usage,
+instant), and (3) previews each look layered proportionally on a mannequin.
+Backend is Supabase (auth + storage + Postgres + Edge Functions).
+**Your Groq key lives only in a Supabase secret — never in the browser.**
 
 ---
 
@@ -21,6 +24,10 @@ Edge Functions). **Your Groq key lives only in a Supabase secret — never in th
    and click **Run**.
    - This creates `profiles`, `clothing_items`, `saved_outfits`, the
      `wardrobe-images` storage bucket, and all row-level-security policies.
+3. Repeat with
+   [`supabase/migrations/20260718120000_preservation_and_local_engine.sql`](supabase/migrations/20260718120000_preservation_and_local_engine.sql)
+   — adds `content_hash` (dedup), `colors` (pixel-exact palette), `bbox`
+   (mannequin proportions), `original_url`, and tightens the upload policy.
 
 ## 3. Turn OFF email confirmation (so sign-up logs you straight in)
 
@@ -31,7 +38,7 @@ Edge Functions). **Your Groq key lives only in a Supabase secret — never in th
 1. **Project Settings → API.** Copy the **Project URL** and the **anon public** key.
 2. In this folder: `cp .env.example .env` and paste both values in.
 
-## 5. Deploy the two Edge Functions (holds the Groq key)
+## 5. Deploy the Edge Function (holds the Groq key)
 
 Install the Supabase CLI once: https://supabase.com/docs/guides/cli
 (`npm i -g supabase`, or `scoop install supabase` on Windows).
@@ -43,15 +50,16 @@ supabase link --project-ref YOUR-PROJECT-REF        # ref is in the dashboard UR
 # Store your Groq key as a server-side secret (NOT in the frontend):
 supabase secrets set GROQ_API_KEY=gsk_your_groq_key_here
 
-# Deploy both functions:
+# Deploy the analysis function (the app's only AI call):
 supabase functions deploy analyze-clothing
-supabase functions deploy generate-outfits
 ```
 
-Optional model overrides (defaults shown):
+> `generate-outfits` is deprecated: outfit generation now runs locally in the
+> client (`src/lib/outfitEngine.ts`) with zero API usage. No need to deploy it.
+
+Optional model override (default shown):
 ```bash
 supabase secrets set GROQ_VISION_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
-supabase secrets set GROQ_TEXT_MODEL=llama-3.3-70b-versatile
 ```
 
 ## 6. Run it

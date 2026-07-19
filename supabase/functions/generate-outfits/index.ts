@@ -2,8 +2,13 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 /*
-  generate-outfits
+  generate-outfits  [DEPRECATED — no longer called by the app]
   ----------------
+  Outfit generation now runs locally in the client (src/lib/outfitEngine.ts)
+  with deterministic rules + CIELAB color-harmony scoring: zero API usage,
+  instant results, and the same wardrobe always produces the same ranking.
+  This function is kept only as a reference / fallback.
+
   Sends the user's wardrobe metadata to a Groq LLM which acts as a stylist:
   it evaluates color harmony, style/formality match, season and pattern
   clashes, then returns ONLY the best-scoring outfits, each with a short

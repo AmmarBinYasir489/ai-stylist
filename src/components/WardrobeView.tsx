@@ -5,12 +5,15 @@ import {
   type ClothingItem,
   type ClothingType,
   type ClothingMetadata,
+  type ItemColor,
+  type AlphaBBox,
   CLOTHING_TYPES,
   TYPE_LABELS,
   STYLE_OPTIONS,
   SEASON_OPTIONS,
   PATTERN_OPTIONS,
 } from "../lib/supabase";
+import { sha256Hex, resizeImage, analyzeCutout } from "../lib/imageTools";
 import {
   Upload,
   Trash2,
@@ -47,28 +50,6 @@ function pathFromUrl(url: string): string | null {
   return idx === -1 ? null : url.slice(idx + marker.length);
 }
 
-// Resize a blob, preserving transparency, and encode as PNG. Keeps uploads
-// small (a 4MB phone photo becomes a few hundred KB) so the Supabase free-tier
-// storage lasts far longer. Returns the original blob if anything goes wrong.
-async function resizePng(blob: Blob, maxDim = 1024): Promise<Blob> {
-  try {
-    const bitmap = await createImageBitmap(blob);
-    const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
-    const w = Math.round(bitmap.width * scale);
-    const h = Math.round(bitmap.height * scale);
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return blob;
-    ctx.drawImage(bitmap, 0, 0, w, h);
-    const out: Blob | null = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
-    return out || blob;
-  } catch {
-    return blob;
-  }
-}
-
 // Cut out the garment on a transparent background (runs entirely in the
 // browser, no external API). The model is lazy-loaded on first use. Falls
 // back to the original file if removal fails.
@@ -82,7 +63,9 @@ async function cutout(file: File): Promise<Blob> {
   }
 }
 
-async function analyzeImage(imageUrl: string): Promise<ClothingMetadata | null> {
+// The only AI call in the whole pipeline: category/style/season/etc. Colors
+// are extracted from pixels locally, so they're excluded from the AI response.
+async function analyzeImage(imageUrl: string): Promise<Partial<ClothingMetadata> | null> {
   const { data: sessionData } = await supabase.auth.getSession();
   const token = sessionData.session?.access_token || import.meta.env.VITE_SUPABASE_ANON_KEY;
   const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/analyze-clothing`;
@@ -109,8 +92,16 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
   const [modalOpen, setModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null); // null => new item
   const [previewUrl, setPreviewUrl] = useState("");
-  const [uploadedPath, setUploadedPath] = useState<string | null>(null); // only for new items, for cancel cleanup
+  const [uploadedPaths, setUploadedPaths] = useState<string[]>([]); // only for new items, for cancel cleanup
   const [meta, setMeta] = useState<ClothingMetadata>(EMPTY_META);
+  // Pixel-derived data for the item being added (exact colors, alpha bbox,
+  // dedup hash, original file URL) — saved alongside the AI metadata.
+  const [pendingExtras, setPendingExtras] = useState<{
+    content_hash: string;
+    colors: ItemColor[];
+    bbox: AlphaBBox | null;
+    original_url: string | null;
+  } | null>(null);
   const [saving, setSaving] = useState(false);
 
   // Filters
@@ -130,30 +121,80 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
     if (!file.type.startsWith("image/")) return;
     setBusy(true);
     try {
+      // 1. Dedup by content hash BEFORE any processing: a re-uploaded photo
+      //    costs zero compute, zero storage and zero AI API usage.
+      setBusyLabel("Checking for duplicates…");
+      const hash = await sha256Hex(file);
+      const existing = items.find((i) => i.content_hash === hash);
+      if (existing) {
+        setBusy(false);
+        alert(`This photo is already in your wardrobe as "${existing.category || TYPE_LABELS[existing.clothing_type]}".`);
+        return;
+      }
+
+      const { data: sessionData } = await supabase.auth.getSession();
+      const userId = sessionData.session?.user?.id;
+      if (!userId) throw new Error("Not signed in.");
+
+      // 2. Background removal (local, free) on the untouched original.
       setBusyLabel("Removing background…");
       const cut = await cutout(file);
+
+      // 3. High-quality downscale (multi-step, 1600px) + pixel analysis:
+      //    exact colors and the garment's bounding box. All local.
+      setBusyLabel("Reading colors…");
+      const png = await resizeImage(cut, 1600, "image/png");
+      const { colors, bbox } = await analyzeCutout(png);
+
+      // 4. Upload the cutout and a lightly-compressed copy of the original
+      //    (kept so the item can always be reprocessed at full quality).
       setBusyLabel("Uploading…");
-      const png = await resizePng(cut);
-      const fileName = `${Date.now()}-${Math.random().toString(36).slice(2)}.png`;
+      const cutoutPath = `${userId}/${hash}.png`;
+      const originalPath = `${userId}/${hash}-orig.jpg`;
+      const originalJpg = await resizeImage(file, 2048, "image/jpeg", 0.9);
+
       const { error: uploadError } = await supabase.storage
         .from(STORAGE_BUCKET)
-        .upload(fileName, png, { contentType: "image/png" });
+        .upload(cutoutPath, png, { contentType: "image/png", upsert: true });
       if (uploadError) throw uploadError;
+      const { error: origError } = await supabase.storage
+        .from(STORAGE_BUCKET)
+        .upload(originalPath, originalJpg, { contentType: "image/jpeg", upsert: true });
+      if (origError) console.warn("Original upload failed (continuing):", origError.message);
 
-      const { data: urlData } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(fileName);
-      const publicUrl = urlData.publicUrl;
+      const publicUrl = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(cutoutPath).data.publicUrl;
+      const originalUrl = origError
+        ? null
+        : supabase.storage.from(STORAGE_BUCKET).getPublicUrl(originalPath).data.publicUrl;
 
-      // Open the modal immediately with the image, analyze in the background.
+      // Open the modal immediately; colors are already filled from pixels.
       setEditingId(null);
-      setUploadedPath(fileName);
+      setUploadedPaths(origError ? [cutoutPath] : [cutoutPath, originalPath]);
       setPreviewUrl(publicUrl);
-      setMeta(EMPTY_META);
+      setPendingExtras({ content_hash: hash, colors, bbox, original_url: originalUrl });
+      setMeta({
+        ...EMPTY_META,
+        primary_color: colors[0]?.name ?? "",
+        secondary_colors: colors.slice(1).map((c) => c.name),
+      });
       setModalOpen(true);
       setBusy(false);
 
+      // 5. The one AI call: categorize the CLEAN CUTOUT (not the original —
+      //    background objects no longer contaminate the result).
       setAnalyzing(true);
       const detected = await analyzeImage(publicUrl);
-      if (detected) setMeta(detected);
+      if (detected) {
+        setMeta((prev) => ({
+          ...prev,
+          ...detected,
+          // Pixel-extracted colors always win over anything AI-shaped.
+          primary_color: prev.primary_color || detected.primary_color || "",
+          secondary_colors: prev.secondary_colors.length
+            ? prev.secondary_colors
+            : detected.secondary_colors ?? [],
+        }));
+      }
       setAnalyzing(false);
     } catch (err) {
       console.error("Upload failed:", err);
@@ -161,7 +202,7 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
       setBusy(false);
       setAnalyzing(false);
     }
-  }, []);
+  }, [items]);
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
@@ -175,7 +216,8 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
 
   const openEdit = (item: ClothingItem) => {
     setEditingId(item.id);
-    setUploadedPath(null);
+    setUploadedPaths([]);
+    setPendingExtras(null);
     setPreviewUrl(item.image_url);
     setMeta({
       category: item.category || "",
@@ -192,12 +234,13 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
   };
 
   const closeModal = async () => {
-    // If this was a new upload the user abandoned, clean up the orphaned file.
-    if (editingId === null && uploadedPath) {
-      await supabase.storage.from(STORAGE_BUCKET).remove([uploadedPath]);
+    // If this was a new upload the user abandoned, clean up the orphaned files.
+    if (editingId === null && uploadedPaths.length > 0) {
+      await supabase.storage.from(STORAGE_BUCKET).remove(uploadedPaths);
     }
     setModalOpen(false);
-    setUploadedPath(null);
+    setUploadedPaths([]);
+    setPendingExtras(null);
     setPreviewUrl("");
     setEditingId(null);
   };
@@ -221,14 +264,20 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
         const { error } = await supabase.from("clothing_items").update(payload).eq("id", editingId);
         if (error) throw error;
       } else {
-        const { error } = await supabase
-          .from("clothing_items")
-          .insert({ ...payload, image_url: previewUrl });
+        const { error } = await supabase.from("clothing_items").insert({
+          ...payload,
+          image_url: previewUrl,
+          content_hash: pendingExtras?.content_hash ?? null,
+          colors: pendingExtras?.colors ?? [],
+          bbox: pendingExtras?.bbox ?? null,
+          original_url: pendingExtras?.original_url ?? null,
+        });
         if (error) throw error;
       }
 
       setModalOpen(false);
-      setUploadedPath(null);
+      setUploadedPaths([]);
+      setPendingExtras(null);
       setPreviewUrl("");
       setEditingId(null);
       onChanged();
@@ -241,8 +290,10 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
   };
 
   const handleDelete = async (item: ClothingItem) => {
-    const path = pathFromUrl(item.image_url);
-    if (path) await supabase.storage.from(STORAGE_BUCKET).remove([path]);
+    const paths = [item.image_url, item.original_url]
+      .map((u) => (u ? pathFromUrl(u) : null))
+      .filter((p): p is string => Boolean(p));
+    if (paths.length > 0) await supabase.storage.from(STORAGE_BUCKET).remove(paths);
     await supabase.from("clothing_items").delete().eq("id", item.id);
     onChanged();
   };

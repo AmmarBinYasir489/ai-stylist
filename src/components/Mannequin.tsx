@@ -23,6 +23,26 @@ function pick(items: ClothingItem[], type: ClothingType): ClothingItem | undefin
   return items.find((i) => i.clothing_type === type);
 }
 
+// Container is aspect-[3/5], so a zone spanning W% of the width spans
+// W% * (3/5) of the height at a square aspect. Given the garment's true
+// aspect (from its alpha bounding box, computed at upload), derive the zone
+// height that makes the box hug the garment exactly — proportions then come
+// from the clothing itself, not from a hardcoded box.
+const CONTAINER_RATIO = 3 / 5;
+
+function zoneHeight(
+  item: ClothingItem | undefined,
+  widthPct: number,
+  fallbackPct: number,
+  minPct: number,
+  maxPct: number,
+): number {
+  const aspect = item?.bbox?.aspect;
+  if (!aspect || aspect <= 0) return fallbackPct;
+  const h = (widthPct * CONTAINER_RATIO) / aspect;
+  return Math.max(minPct, Math.min(maxPct, h));
+}
+
 // A garment cutout placed over a body zone. Images are transparent PNGs
 // (background removed at upload) so object-contain makes them look worn
 // rather than framed.
@@ -82,7 +102,12 @@ export function Mannequin({ items, size = "lg" }: MannequinProps) {
       <Zone
         item={outerwear}
         zIndex={1}
-        style={{ left: "6%", width: "88%", top: "15%", height: "42%" }}
+        style={{
+          left: "6%",
+          width: "88%",
+          top: "15%",
+          height: `${zoneHeight(outerwear, 88, 42, 30, 52)}%`,
+        }}
       />
 
       {/* Top — chest/torso, narrower when layered under outerwear */}
@@ -91,8 +116,18 @@ export function Mannequin({ items, size = "lg" }: MannequinProps) {
         zIndex={2}
         style={
           hasOuter
-            ? { left: "26%", width: "48%", top: "16%", height: "34%" }
-            : { left: "16%", width: "68%", top: "15%", height: "37%" }
+            ? {
+                left: "26%",
+                width: "48%",
+                top: "16%",
+                height: `${zoneHeight(top, 48, 34, 22, 40)}%`,
+              }
+            : {
+                left: "16%",
+                width: "68%",
+                top: "15%",
+                height: `${zoneHeight(top, 68, 37, 24, 44)}%`,
+              }
         }
       />
 
@@ -100,21 +135,36 @@ export function Mannequin({ items, size = "lg" }: MannequinProps) {
       <Zone
         item={bottom}
         zIndex={2}
-        style={{ left: "22%", width: "56%", top: "45%", height: "38%" }}
+        style={{
+          left: "22%",
+          width: "56%",
+          top: "45%",
+          height: `${zoneHeight(bottom, 56, 38, 26, 46)}%`,
+        }}
       />
 
       {/* Footwear — feet */}
       <Zone
         item={footwear}
         zIndex={3}
-        style={{ left: "26%", width: "48%", top: "80%", height: "16%" }}
+        style={{
+          left: "26%",
+          width: "48%",
+          top: "80%",
+          height: `${zoneHeight(footwear, 48, 16, 9, 18)}%`,
+        }}
       />
 
       {/* Accessory — small tag near the neck */}
       <Zone
         item={accessory}
         zIndex={4}
-        style={{ right: "2%", width: "24%", top: "8%", height: "16%" }}
+        style={{
+          right: "2%",
+          width: "24%",
+          top: "8%",
+          height: `${zoneHeight(accessory, 24, 16, 8, 18)}%`,
+        }}
       />
     </div>
   );

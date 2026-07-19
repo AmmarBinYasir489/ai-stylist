@@ -3,14 +3,18 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 /*
   analyze-clothing
   ----------------
-  Takes an uploaded clothing image and returns structured metadata using
-  Groq's Llama 4 Scout vision model. The Groq API key lives only here as a
-  Supabase secret (GROQ_API_KEY) and is never exposed to the browser.
+  The ONLY AI call in the pipeline. Takes the background-removed cutout and
+  returns categorical metadata using Groq's Llama 4 Scout vision model. The
+  Groq API key lives only here as a Supabase secret (GROQ_API_KEY).
 
-  Request:  POST { image_url: string }   (public URL of the uploaded photo)
-  Response: 200  { metadata: { category, clothing_type, primary_color,
-                                secondary_colors[], pattern, style, season,
-                                material, fit } }
+  Colors are deliberately NOT asked of the model — the client extracts exact
+  colors from the garment's pixels (CIELAB k-means), which is deterministic,
+  free, and immune to hallucination. Keeping colors out of the prompt also
+  shrinks the response (fewer output tokens per call).
+
+  Request:  POST { image_url: string }   (public URL of the cutout PNG)
+  Response: 200  { metadata: { category, clothing_type, pattern, style,
+                                season, material, fit } }
 */
 
 const corsHeaders = {
@@ -30,8 +34,6 @@ Return exactly these fields:
 {
   "category": string,            // specific garment name, e.g. "T-Shirt", "Jeans", "Blazer", "Sneakers", "Watch"
   "clothing_type": string,       // one of: "top", "bottom", "footwear", "outerwear", "accessory"
-  "primary_color": string,       // single lowercase color word, e.g. "navy", "white", "olive"
-  "secondary_colors": string[],  // 0-3 other lowercase colors present, [] if none
   "pattern": string,             // e.g. "solid", "striped", "plaid", "floral", "graphic", "checked"
   "style": string,               // one of: "casual", "formal", "smart casual", "streetwear", "sporty", "business"
   "season": string,              // one of: "summer", "winter", "spring", "fall", "all-season"
@@ -41,8 +43,8 @@ Return exactly these fields:
 
 Rules:
 - clothing_type MUST be one of the five allowed values. Map: shirts/tees/tops/sweaters/blouses -> "top"; pants/jeans/shorts/skirts/trousers -> "bottom"; shoes/sneakers/boots/heels/sandals -> "footwear"; jackets/coats/blazers/hoodies-as-outer-layer -> "outerwear"; watches/hats/bags/belts/scarves/jewelry/sunglasses -> "accessory".
-- Use simple, common color names.
-- If a field is genuinely undetectable, use "unknown" (for arrays use []).`;
+- Do NOT describe colors; they are measured separately.
+- If a field is genuinely undetectable, use "unknown".`;
 
 function normalizeType(t: unknown): string {
   const v = String(t || "").toLowerCase().trim();
@@ -50,14 +52,9 @@ function normalizeType(t: unknown): string {
 }
 
 function coerceMetadata(raw: Record<string, unknown>) {
-  const secondary = Array.isArray(raw.secondary_colors)
-    ? raw.secondary_colors.map((c) => String(c).toLowerCase()).filter(Boolean).slice(0, 3)
-    : [];
   return {
     category: String(raw.category || "Item").trim(),
     clothing_type: normalizeType(raw.clothing_type),
-    primary_color: String(raw.primary_color || "unknown").toLowerCase().trim(),
-    secondary_colors: secondary,
     pattern: String(raw.pattern || "solid").toLowerCase().trim(),
     style: String(raw.style || "casual").toLowerCase().trim(),
     season: String(raw.season || "all-season").toLowerCase().trim(),
@@ -94,8 +91,8 @@ Deno.serve(async (req: Request) => {
       },
       body: JSON.stringify({
         model: VISION_MODEL,
-        temperature: 0.2,
-        max_tokens: 500,
+        temperature: 0,
+        max_tokens: 300,
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: SYSTEM_PROMPT },

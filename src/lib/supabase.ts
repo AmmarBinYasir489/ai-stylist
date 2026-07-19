@@ -20,14 +20,34 @@ export const STORAGE_BUCKET = "wardrobe-images";
 // Structural slot — drives the mannequin renderer and the outfit generator.
 export type ClothingType = "top" | "bottom" | "footwear" | "outerwear" | "accessory";
 
+// Exact color extracted from the garment's pixels (not AI-guessed).
+export interface ItemColor {
+  hex: string;
+  name: string;
+  coverage: number;
+}
+
+// Tight bounding box of the garment inside its cutout image (fractions 0..1).
+export interface AlphaBBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  aspect: number; // garment w/h — drives proportional mannequin scaling
+}
+
 export interface ClothingItem {
   id: string;
   user_id: string;
   image_url: string;
+  original_url: string | null; // untouched upload, kept for reprocessing
+  content_hash: string | null; // sha256 of the original file — dedup key
   category: string | null; // specific label e.g. "T-Shirt", "Jeans"
   clothing_type: ClothingType;
   primary_color: string | null;
   secondary_colors: string[];
+  colors: ItemColor[] | null; // pixel-exact palette
+  bbox: AlphaBBox | null;
   pattern: string | null;
   style: string | null;
   season: string | null;
@@ -37,7 +57,8 @@ export interface ClothingItem {
   created_at: string;
 }
 
-// AI metadata returned by the analyze-clothing edge function.
+// AI metadata returned by the analyze-clothing edge function. Colors are NOT
+// part of the AI response anymore — they are extracted from pixels locally.
 export interface ClothingMetadata {
   category: string;
   clothing_type: ClothingType;

@@ -156,7 +156,16 @@ function App() {
       {/* Main Content */}
       <main className="mx-auto max-w-6xl px-4 sm:px-6 py-6 pb-24">
         {tab === "wardrobe" ? (
-          <WardrobeView items={items} loading={loading} onChanged={fetchItems} />
+          // Refresh saved outfits too: deleting an item cascades (DB trigger)
+          // to every saved outfit that used it.
+          <WardrobeView
+            items={items}
+            loading={loading}
+            onChanged={() => {
+              fetchItems();
+              fetchSavedOutfits();
+            }}
+          />
         ) : (
           <OutfitsView items={items} savedOutfits={savedOutfits} onSavedChanged={fetchSavedOutfits} />
         )}

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   supabase,
   type ClothingItem,
@@ -6,6 +6,7 @@ import {
   type SavedOutfit,
   TYPE_LABELS,
 } from "../lib/supabase";
+import { generateOutfits, outfitKey } from "../lib/outfitEngine";
 import { Mannequin } from "./Mannequin";
 import { Sparkles, Loader2, Trash2, Star, Check, Bookmark } from "lucide-react";
 
@@ -43,28 +44,37 @@ export function OutfitsView({ items, savedOutfits, onSavedChanged }: OutfitsView
     [savedOutfits],
   );
 
-  const handleGenerate = async () => {
+  // Looks already shown for the current occasion — clicking "Style Me" again
+  // rotates through the next-best combinations instead of repeating.
+  const shownKeys = useRef<Map<string, Set<string>>>(new Map());
+
+  // Outfits are generated locally (deterministic rules + color-harmony
+  // scoring on the garments' exact pixel colors). No API call, no cost.
+  const handleGenerate = () => {
     setGenerating(true);
     setError("");
-    setResults([]);
     try {
-      const { data: sessionData } = await supabase.auth.getSession();
-      const token = sessionData.session?.access_token || import.meta.env.VITE_SUPABASE_ANON_KEY;
-      const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/generate-outfits`;
-      const res = await fetch(apiUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ occasion: occasion === "any" ? undefined : occasion }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || `Request failed (${res.status})`);
+      const occ = occasion === "any" ? null : occasion;
+      const bucket = occasion;
+      let exclude = shownKeys.current.get(bucket);
+      if (!exclude) {
+        exclude = new Set<string>();
+        shownKeys.current.set(bucket, exclude);
       }
-      const data = await res.json();
-      if (!Array.isArray(data.outfits)) throw new Error("Unexpected response from server.");
-      setResults(data.outfits);
+
+      let outfits = generateOutfits(items, occ, { exclude });
+      if (outfits.length === 0 && exclude.size > 0) {
+        // Every strong look has been shown — start the rotation over.
+        exclude.clear();
+        outfits = generateOutfits(items, occ, { exclude });
+      }
+      for (const o of outfits) exclude.add(outfitKey(o.item_ids));
+
+      setResults(outfits);
       setView("suggestions");
-      if (data.outfits.length === 0) setError("The AI couldn't build a strong outfit yet — try adding more variety.");
+      if (outfits.length === 0) {
+        setError("No strong outfit found for this occasion yet — try adding more variety.");
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to generate outfits.");
     } finally {

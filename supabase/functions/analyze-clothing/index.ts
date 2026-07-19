@@ -24,7 +24,9 @@ const corsHeaders = {
 };
 
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const VISION_MODEL = Deno.env.get("GROQ_VISION_MODEL") || "meta-llama/llama-4-scout-17b-16e-instruct";
+// NOTE: Groq removed the Llama 4 vision models (llama-4-scout returned 404 as
+// of 2026-07). qwen3.6-27b is the multimodal model currently available.
+const VISION_MODEL = Deno.env.get("GROQ_VISION_MODEL") || "qwen/qwen3.6-27b";
 
 const CLOTHING_TYPES = ["top", "bottom", "footwear", "outerwear", "accessory"] as const;
 
@@ -92,7 +94,11 @@ Deno.serve(async (req: Request) => {
       body: JSON.stringify({
         model: VISION_MODEL,
         temperature: 0,
-        max_tokens: 300,
+        // qwen3.6 is a reasoning model: disable thinking for this simple
+        // labeling task (fewer output tokens, faster) but keep a roomy cap
+        // in case a future model ignores reasoning_effort.
+        reasoning_effort: "none",
+        max_tokens: 2048,
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: SYSTEM_PROMPT },

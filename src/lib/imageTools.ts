@@ -90,6 +90,69 @@ export async function resizeImage(
   }
 }
 
+// Product-style framing: trim the cutout to the garment's alpha bounding box
+// and center it on a square transparent canvas with even margins — every
+// wardrobe photo ends up framed like a studio flat-lay regardless of how the
+// original was shot. Returns hasAlpha=false (blob untouched) when background
+// removal produced no transparency, so callers can warn the user.
+export async function trimToContent(
+  blob: Blob,
+  marginFrac = 0.08,
+): Promise<{ blob: Blob; hasAlpha: boolean }> {
+  try {
+    const bitmap = await createImageBitmap(blob);
+    const w = bitmap.width;
+    const h = bitmap.height;
+    const src = document.createElement("canvas");
+    src.width = w;
+    src.height = h;
+    const sctx = src.getContext("2d", { willReadFrequently: true });
+    if (!sctx) return { blob, hasAlpha: false };
+    sctx.drawImage(bitmap, 0, 0);
+    const { data } = sctx.getImageData(0, 0, w, h);
+
+    let minX = w, minY = h, maxX = -1, maxY = -1;
+    let transparent = 0;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const a = data[(y * w + x) * 4 + 3];
+        if (a < 30) {
+          transparent++;
+          continue;
+        }
+        if (a < 200) continue;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+
+    // Almost no transparent pixels => background removal didn't really run.
+    if (transparent / (w * h) < 0.05 || maxX < 0) return { blob, hasAlpha: false };
+
+    const bw = maxX - minX + 1;
+    const bh = maxY - minY + 1;
+    const side = Math.ceil(Math.max(bw, bh) * (1 + marginFrac * 2));
+    const out = document.createElement("canvas");
+    out.width = side;
+    out.height = side;
+    const octx = out.getContext("2d");
+    if (!octx) return { blob, hasAlpha: true };
+    octx.imageSmoothingEnabled = true;
+    octx.imageSmoothingQuality = "high";
+    octx.drawImage(
+      src,
+      minX, minY, bw, bh,
+      Math.round((side - bw) / 2), Math.round((side - bh) / 2), bw, bh,
+    );
+    const result: Blob | null = await new Promise((resolve) => out.toBlob(resolve, "image/png"));
+    return { blob: result || blob, hasAlpha: true };
+  } catch {
+    return { blob, hasAlpha: false };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Color math (sRGB -> CIELAB)
 // ---------------------------------------------------------------------------

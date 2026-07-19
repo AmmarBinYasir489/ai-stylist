@@ -13,7 +13,7 @@ import {
   SEASON_OPTIONS,
   PATTERN_OPTIONS,
 } from "../lib/supabase";
-import { sha256Hex, resizeImage, analyzeCutout } from "../lib/imageTools";
+import { sha256Hex, resizeImage, analyzeCutout, trimToContent } from "../lib/imageTools";
 import {
   Upload,
   Trash2,
@@ -102,6 +102,9 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
     bbox: AlphaBBox | null;
     original_url: string | null;
   } | null>(null);
+  // Non-fatal processing problems, surfaced in the modal instead of silently
+  // producing bad data (e.g. background kept, AI analysis unavailable).
+  const [uploadWarnings, setUploadWarnings] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
 
   // Filters
@@ -140,11 +143,23 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
       setBusyLabel("Removing background…");
       const cut = await cutout(file);
 
-      // 3. High-quality downscale (multi-step, 1600px) + pixel analysis:
-      //    exact colors and the garment's bounding box. All local.
-      setBusyLabel("Reading colors…");
-      const png = await resizeImage(cut, 1600, "image/png");
-      const { colors, bbox } = await analyzeCutout(png);
+      // 3. High-quality downscale (multi-step, 1600px), then product-style
+      //    framing: trim to the garment and center it with even margins.
+      //    If the result has no transparency, background removal failed —
+      //    warn instead of silently extracting colors from the backdrop.
+      setBusyLabel("Framing & reading colors…");
+      const resized = await resizeImage(cut, 1600, "image/png");
+      const { blob: png, hasAlpha } = await trimToContent(resized);
+      const warnings: string[] = [];
+      let colors: ItemColor[] = [];
+      let bbox: AlphaBBox | null = null;
+      if (hasAlpha) {
+        ({ colors, bbox } = await analyzeCutout(png));
+      } else {
+        warnings.push(
+          "Background couldn't be removed from this photo, so colors weren't auto-detected. For best results, lay the item flat on a plain background and re-upload.",
+        );
+      }
 
       // 4. Upload the cutout and a lightly-compressed copy of the original
       //    (kept so the item can always be reprocessed at full quality).
@@ -180,6 +195,7 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
       setUploadedPaths(origFailed ? [cutoutPath] : [cutoutPath, originalPath]);
       setPreviewUrl(publicUrl);
       setPendingExtras({ content_hash: hash, colors, bbox, original_url: originalUrl });
+      setUploadWarnings(warnings);
       setMeta({
         ...EMPTY_META,
         primary_color: colors[0]?.name ?? "",
@@ -202,6 +218,11 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
             ? prev.secondary_colors
             : detected.secondary_colors ?? [],
         }));
+      } else {
+        setUploadWarnings((w) => [
+          ...w,
+          "AI couldn't identify this item — please pick the category, type and other details manually.",
+        ]);
       }
       setAnalyzing(false);
     } catch (err) {
@@ -228,6 +249,7 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
     setEditingId(item.id);
     setUploadedPaths([]);
     setPendingExtras(null);
+    setUploadWarnings([]);
     setPreviewUrl(item.image_url);
     setMeta({
       category: item.category || "",
@@ -251,6 +273,7 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
     setModalOpen(false);
     setUploadedPaths([]);
     setPendingExtras(null);
+    setUploadWarnings([]);
     setPreviewUrl("");
     setEditingId(null);
   };
@@ -376,6 +399,20 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
           <Sparkles className="h-3.5 w-3.5" />
           Background removed + category, color, style &amp; season detected automatically
         </p>
+        {/* Photo rules — following these is what makes cutouts, colors and
+            outfits look like clean product shots. */}
+        {!busy && (
+          <div className="mx-auto mt-4 flex max-w-xl flex-wrap items-center justify-center gap-x-3 gap-y-1 text-xs text-stone-400">
+            <span className="font-medium text-stone-500">Photo tips:</span>
+            <span>one item per photo</span>
+            <span aria-hidden>·</span>
+            <span>plain, uncluttered background</span>
+            <span aria-hidden>·</span>
+            <span>lay flat &amp; fill the frame</span>
+            <span aria-hidden>·</span>
+            <span>bright, even lighting</span>
+          </div>
+        )}
       </div>
 
       {/* Filters */}
@@ -477,7 +514,13 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
                 )}
               </div>
 
-              {!analyzing && !editingId && (
+              {uploadWarnings.map((w) => (
+                <p key={w} className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  {w}
+                </p>
+              ))}
+
+              {!analyzing && !editingId && uploadWarnings.length === 0 && (
                 <p className="mb-4 flex items-center gap-1.5 rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
                   <Sparkles className="h-3.5 w-3.5" />
                   AI-detected details below — edit anything before saving.

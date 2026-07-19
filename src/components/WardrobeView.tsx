@@ -153,23 +153,31 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
       const originalPath = `${userId}/${hash}-orig.jpg`;
       const originalJpg = await resizeImage(file, 2048, "image/jpeg", 0.9);
 
+      // Files are content-hash-named, so "already exists" means the identical
+      // bytes are already in storage — that's success, not an error.
+      const alreadyExists = (e: { message?: string } | null) =>
+        Boolean(e?.message && /already exists|duplicate/i.test(e.message));
+
       const { error: uploadError } = await supabase.storage
         .from(STORAGE_BUCKET)
         .upload(cutoutPath, png, { contentType: "image/png", upsert: true });
-      if (uploadError) throw uploadError;
+      if (uploadError && !alreadyExists(uploadError)) {
+        throw new Error(`Image upload failed: ${uploadError.message}`);
+      }
       const { error: origError } = await supabase.storage
         .from(STORAGE_BUCKET)
         .upload(originalPath, originalJpg, { contentType: "image/jpeg", upsert: true });
-      if (origError) console.warn("Original upload failed (continuing):", origError.message);
+      const origFailed = Boolean(origError && !alreadyExists(origError));
+      if (origFailed) console.warn("Original upload failed (continuing):", origError?.message);
 
       const publicUrl = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(cutoutPath).data.publicUrl;
-      const originalUrl = origError
+      const originalUrl = origFailed
         ? null
         : supabase.storage.from(STORAGE_BUCKET).getPublicUrl(originalPath).data.publicUrl;
 
       // Open the modal immediately; colors are already filled from pixels.
       setEditingId(null);
-      setUploadedPaths(origError ? [cutoutPath] : [cutoutPath, originalPath]);
+      setUploadedPaths(origFailed ? [cutoutPath] : [cutoutPath, originalPath]);
       setPreviewUrl(publicUrl);
       setPendingExtras({ content_hash: hash, colors, bbox, original_url: originalUrl });
       setMeta({
@@ -198,7 +206,9 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
       setAnalyzing(false);
     } catch (err) {
       console.error("Upload failed:", err);
-      alert("Upload failed. Please try again.");
+      // Surface the real reason — a generic message makes failures undiagnosable.
+      const detail = err instanceof Error ? err.message : "Unknown error";
+      alert(`Upload failed: ${detail}`);
       setBusy(false);
       setAnalyzing(false);
     }

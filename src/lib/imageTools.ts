@@ -31,6 +31,32 @@ export interface CutoutAnalysis {
   bbox: AlphaBBox | null;
 }
 
+// Decode respecting the EXIF orientation flag — phone photos are often
+// stored rotated with a flag that plain decoding ignores, which silently
+// bakes sideways images into the pipeline.
+async function decodeUpright(blob: Blob): Promise<ImageBitmap> {
+  try {
+    return await createImageBitmap(blob, { imageOrientation: "from-image" });
+  } catch {
+    return await createImageBitmap(blob);
+  }
+}
+
+// Rotate 90° clockwise (lossless for PNG content). Click again for 180/270.
+export async function rotate90(blob: Blob): Promise<Blob> {
+  const bmp = await decodeUpright(blob);
+  const canvas = document.createElement("canvas");
+  canvas.width = bmp.height;
+  canvas.height = bmp.width;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return blob;
+  ctx.translate(canvas.width / 2, canvas.height / 2);
+  ctx.rotate(Math.PI / 2);
+  ctx.drawImage(bmp, -bmp.width / 2, -bmp.height / 2);
+  const out: Blob | null = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+  return out || blob;
+}
+
 export async function sha256Hex(blob: Blob): Promise<string> {
   const buf = await blob.arrayBuffer();
   const digest = await crypto.subtle.digest("SHA-256", buf);
@@ -48,7 +74,7 @@ export async function resizeImage(
   quality = 0.92,
 ): Promise<Blob> {
   try {
-    let bitmap: ImageBitmap | HTMLCanvasElement = await createImageBitmap(blob);
+    let bitmap: ImageBitmap | HTMLCanvasElement = await decodeUpright(blob);
     let w = bitmap.width;
     let h = bitmap.height;
     if (Math.max(w, h) <= maxDim) {
@@ -100,7 +126,7 @@ export async function trimToContent(
   marginFrac = 0.08,
 ): Promise<{ blob: Blob; hasAlpha: boolean }> {
   try {
-    const bitmap = await createImageBitmap(blob);
+    const bitmap = await decodeUpright(blob);
     const w = bitmap.width;
     const h = bitmap.height;
     const src = document.createElement("canvas");
@@ -233,7 +259,7 @@ export function hexForColorName(name: string | null | undefined): string | null 
 
 export async function analyzeCutout(blob: Blob): Promise<CutoutAnalysis> {
   try {
-    const bitmap = await createImageBitmap(blob);
+    const bitmap = await decodeUpright(blob);
     const scale = Math.min(1, 384 / Math.max(bitmap.width, bitmap.height));
     const w = Math.max(1, Math.round(bitmap.width * scale));
     const h = Math.max(1, Math.round(bitmap.height * scale));

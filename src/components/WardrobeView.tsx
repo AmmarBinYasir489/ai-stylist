@@ -13,7 +13,7 @@ import {
   SEASON_OPTIONS,
   PATTERN_OPTIONS,
 } from "../lib/supabase";
-import { sha256Hex, resizeImage, analyzeCutout, trimToContent } from "../lib/imageTools";
+import { sha256Hex, resizeImage, analyzeCutout, trimToContent, rotate90 } from "../lib/imageTools";
 import {
   Upload,
   Trash2,
@@ -24,6 +24,7 @@ import {
   Heart,
   Pencil,
   Search,
+  RotateCw,
 } from "lucide-react";
 
 interface WardrobeViewProps {
@@ -47,7 +48,9 @@ const EMPTY_META: ClothingMetadata = {
 function pathFromUrl(url: string): string | null {
   const marker = `/${STORAGE_BUCKET}/`;
   const idx = url.indexOf(marker);
-  return idx === -1 ? null : url.slice(idx + marker.length);
+  if (idx === -1) return null;
+  // Strip cache-busting query params (?v=...) — they're not part of the path.
+  return url.slice(idx + marker.length).split("?")[0];
 }
 
 // Cut out the garment on a transparent background (runs entirely in the
@@ -105,7 +108,56 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
   // Non-fatal processing problems, surfaced in the modal instead of silently
   // producing bad data (e.g. background kept, AI analysis unavailable).
   const [uploadWarnings, setUploadWarnings] = useState<string[]>([]);
+  const [rotating, setRotating] = useState(false);
+  // When an EXISTING item's image is rotated, the new url/colors/bbox are
+  // staged here and written with the row on Save.
+  const [editImagePatch, setEditImagePatch] = useState<{
+    image_url: string;
+    colors: ItemColor[];
+    bbox: AlphaBBox | null;
+  } | null>(null);
   const [saving, setSaving] = useState(false);
+
+  // Rotate the stored cutout 90° clockwise in place (same storage path,
+  // cache-busted URL) and re-measure colors + bounding box.
+  const rotateStoredImage = useCallback(async (url: string) => {
+    const path = pathFromUrl(url);
+    if (!path) throw new Error("Couldn't locate the stored image.");
+    const blob = await (await fetch(url)).blob();
+    const rotated = await rotate90(blob);
+    const { colors, bbox } = await analyzeCutout(rotated);
+    const { error } = await supabase.storage
+      .from(STORAGE_BUCKET)
+      .upload(path, rotated, { contentType: "image/png", upsert: true });
+    if (error) throw new Error(error.message);
+    const base = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(path).data.publicUrl;
+    return { url: `${base}?v=${Date.now()}`, colors, bbox };
+  }, []);
+
+  const handleRotate = async () => {
+    if (!previewUrl || rotating) return;
+    setRotating(true);
+    try {
+      const { url, colors, bbox } = await rotateStoredImage(previewUrl);
+      setPreviewUrl(url);
+      if (editingId) {
+        setEditImagePatch({ image_url: url, colors, bbox });
+      } else {
+        setPendingExtras((p) => (p ? { ...p, colors, bbox } : p));
+      }
+      if (colors.length > 0) {
+        setMeta((m) => ({
+          ...m,
+          primary_color: colors[0].name,
+          secondary_colors: colors.slice(1).map((c) => c.name),
+        }));
+      }
+    } catch (err) {
+      alert(`Rotate failed: ${err instanceof Error ? err.message : "unknown error"}`);
+    } finally {
+      setRotating(false);
+    }
+  };
 
   // Filters
   const [search, setSearch] = useState("");
@@ -218,6 +270,29 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
             ? prev.secondary_colors
             : detected.secondary_colors ?? [],
         }));
+
+        // 6. Auto-upright: garments photographed sideways render sideways on
+        //    the mannequin. Once the type is known, a clearly-landscape
+        //    top/bottom/outerwear gets stood up automatically (thresholds are
+        //    conservative — spread-sleeve tees ~1.3, shorts ~1.5 stay put;
+        //    the Rotate button covers anything the heuristic misses).
+        const uprightLimit =
+          detected.clothing_type === "bottom" ? 1.6 :
+          detected.clothing_type === "top" || detected.clothing_type === "outerwear" ? 1.45 :
+          Infinity;
+        if (bbox && bbox.aspect >= uprightLimit) {
+          try {
+            const r = await rotateStoredImage(publicUrl);
+            setPreviewUrl(r.url);
+            setPendingExtras((p) => (p ? { ...p, colors: r.colors, bbox: r.bbox } : p));
+            setUploadWarnings((w) => [
+              ...w,
+              "This photo looked sideways, so it was auto-rotated upright — use the Rotate button if it isn't right.",
+            ]);
+          } catch (err) {
+            console.warn("Auto-rotate failed (continuing):", err);
+          }
+        }
       } else {
         setUploadWarnings((w) => [
           ...w,
@@ -233,7 +308,7 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
       setBusy(false);
       setAnalyzing(false);
     }
-  }, [items]);
+  }, [items, rotateStoredImage]);
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
@@ -250,6 +325,7 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
     setUploadedPaths([]);
     setPendingExtras(null);
     setUploadWarnings([]);
+    setEditImagePatch(null);
     setPreviewUrl(item.image_url);
     setMeta({
       category: item.category || "",
@@ -274,6 +350,7 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
     setUploadedPaths([]);
     setPendingExtras(null);
     setUploadWarnings([]);
+    setEditImagePatch(null);
     setPreviewUrl("");
     setEditingId(null);
   };
@@ -294,7 +371,12 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
       };
 
       if (editingId) {
-        const { error } = await supabase.from("clothing_items").update(payload).eq("id", editingId);
+        // If the image was rotated during this edit, persist the new url
+        // (cache-busted) and the re-measured colors/bbox with it.
+        const { error } = await supabase
+          .from("clothing_items")
+          .update({ ...payload, ...(editImagePatch ?? {}) })
+          .eq("id", editingId);
         if (error) throw error;
       } else {
         const { error } = await supabase.from("clothing_items").insert({
@@ -505,7 +587,18 @@ export function WardrobeView({ items, loading, onChanged }: WardrobeViewProps) {
 
             <div className="p-6">
               <div className="relative mb-4 overflow-hidden rounded-xl bg-stone-100">
-                {previewUrl && <img src={previewUrl} alt="Preview" className="h-48 w-full object-cover" />}
+                {previewUrl && <img src={previewUrl} alt="Preview" className="h-48 w-full object-contain" />}
+                {previewUrl && !analyzing && (
+                  <button
+                    onClick={handleRotate}
+                    disabled={rotating || saving}
+                    title="Rotate 90°"
+                    className="absolute right-2 top-2 flex items-center gap-1.5 rounded-lg bg-black/50 px-2.5 py-1.5 text-xs font-medium text-white backdrop-blur transition-all hover:bg-black/70 disabled:opacity-50"
+                  >
+                    {rotating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCw className="h-3.5 w-3.5" />}
+                    Rotate
+                  </button>
+                )}
                 {analyzing && (
                   <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/40 text-white">
                     <Loader2 className="h-6 w-6 animate-spin" />

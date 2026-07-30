@@ -98,12 +98,10 @@ supabase/
 ### Installation
 
 ```bash
-git clone https://github.com/AmmarBinYasir489/Ai-stylist.git
-cd Ai-stylist
+git clone https://github.com/AmmarBinYasir489/ai-stylist.git
+cd ai-stylist
 npm install
 ```
-
-The clone URL above matches the current GitHub repository.
 
 Create `.env`:
 

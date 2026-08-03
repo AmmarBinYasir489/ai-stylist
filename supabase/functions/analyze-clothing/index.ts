@@ -18,7 +18,7 @@ import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 */
 
 const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Origin": Deno.env.get("ALLOWED_ORIGIN") || "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
 };
@@ -27,6 +27,10 @@ const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 // NOTE: Groq removed the Llama 4 vision models (llama-4-scout returned 404 as
 // of 2026-07). qwen3.6-27b is the multimodal model currently available.
 const VISION_MODEL = Deno.env.get("GROQ_VISION_MODEL") || "qwen/qwen3.6-27b";
+const MAX_BODY_BYTES = 16 * 1024;
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_REQUESTS = 12;
+const rateLimitBuckets = new Map<string, number[]>();
 
 const CLOTHING_TYPES = ["top", "bottom", "footwear", "outerwear", "accessory"] as const;
 
@@ -53,21 +57,63 @@ function normalizeType(t: unknown): string {
   return (CLOTHING_TYPES as readonly string[]).includes(v) ? v : "top";
 }
 
+function requestKey(req: Request): string {
+  const auth = req.headers.get("authorization");
+  if (auth) return auth.slice(-64);
+  return req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "anonymous";
+}
+
+function rateLimit(key: string): number | null {
+  const now = Date.now();
+  const active = (rateLimitBuckets.get(key) || []).filter(
+    (timestamp) => now - timestamp < RATE_LIMIT_WINDOW_MS,
+  );
+  if (active.length >= RATE_LIMIT_MAX_REQUESTS) {
+    rateLimitBuckets.set(key, active);
+    return Math.ceil((RATE_LIMIT_WINDOW_MS - (now - active[0])) / 1000);
+  }
+  active.push(now);
+  rateLimitBuckets.set(key, active);
+  return null;
+}
+
+function parseImageUrl(value: unknown): string | null {
+  if (typeof value !== "string" || value.length === 0 || value.length > 2048) {
+    return null;
+  }
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
 function coerceMetadata(raw: Record<string, unknown>) {
+  const text = (value: unknown, fallback: string, max = 80) => {
+    const normalized = String(value || fallback).trim().slice(0, max);
+    return normalized || fallback;
+  };
   return {
-    category: String(raw.category || "Item").trim(),
+    category: text(raw.category, "Item"),
     clothing_type: normalizeType(raw.clothing_type),
-    pattern: String(raw.pattern || "solid").toLowerCase().trim(),
-    style: String(raw.style || "casual").toLowerCase().trim(),
-    season: String(raw.season || "all-season").toLowerCase().trim(),
-    material: String(raw.material || "unknown").toLowerCase().trim(),
-    fit: String(raw.fit || "regular").toLowerCase().trim(),
+    pattern: text(raw.pattern, "solid", 40).toLowerCase(),
+    style: text(raw.style, "casual", 40).toLowerCase(),
+    season: text(raw.season, "all-season", 24).toLowerCase(),
+    material: text(raw.material, "unknown", 40).toLowerCase(),
+    fit: text(raw.fit, "regular", 40).toLowerCase(),
   };
 }
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 200, headers: corsHeaders });
+  }
+  if (req.method !== "POST") {
+    return new Response("Method not allowed", {
+      status: 405,
+      headers: { ...corsHeaders, Allow: "POST, OPTIONS" },
+    });
   }
 
   const json = (body: unknown, status = 200) =>
@@ -77,12 +123,33 @@ Deno.serve(async (req: Request) => {
     });
 
   try {
+    const contentLength = Number(req.headers.get("content-length") || "0");
+    if (contentLength > MAX_BODY_BYTES) {
+      return json({ error: "Request body is too large." }, 413);
+    }
+
+    const retryAfter = rateLimit(requestKey(req));
+    if (retryAfter !== null) {
+      return new Response(
+        JSON.stringify({ error: "Too many analysis requests. Please try again shortly." }),
+        {
+          status: 429,
+          headers: {
+            ...corsHeaders,
+            "Content-Type": "application/json",
+            "Retry-After": String(retryAfter),
+          },
+        },
+      );
+    }
+
     const groqKey = Deno.env.get("GROQ_API_KEY");
     if (!groqKey) return json({ error: "GROQ_API_KEY is not configured on the server." }, 500);
 
     const { image_url } = await req.json().catch(() => ({}));
-    if (!image_url || typeof image_url !== "string") {
-      return json({ error: "image_url is required." }, 400);
+    const imageUrl = parseImageUrl(image_url);
+    if (!imageUrl) {
+      return json({ error: "image_url must be a valid HTTPS URL." }, 400);
     }
 
     const groqRes = await fetch(GROQ_URL, {
@@ -106,7 +173,7 @@ Deno.serve(async (req: Request) => {
             role: "user",
             content: [
               { type: "text", text: "Analyze this clothing item and return the JSON metadata." },
-              { type: "image_url", image_url: { url: image_url } },
+              { type: "image_url", image_url: { url: imageUrl } },
             ],
           },
         ],

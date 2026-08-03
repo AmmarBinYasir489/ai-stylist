@@ -127,6 +127,7 @@ Open [http://localhost:5173](http://localhost:5173).
 ```bash
 supabase secrets set GROQ_API_KEY=your_key
 supabase secrets set GROQ_VISION_MODEL=qwen/qwen3.6-27b
+supabase secrets set ALLOWED_ORIGIN=https://your-production-domain.example
 ```
 
 4. Deploy the active analysis function:
@@ -148,6 +149,8 @@ npm run build
 ## Privacy and cost controls
 
 - The Groq key remains inside the Supabase Edge Function.
+- The analysis endpoint accepts only HTTPS image URLs, limits request-body size, and applies a per-instance request limit.
+- Configure `ALLOWED_ORIGIN` in production to prevent untrusted browser origins from calling the endpoint.
 - Vision AI is used during new-item classification, not during every outfit request.
 - Re-uploading the same image can reuse the content hash and avoid duplicate processing.
 - Outfit generation runs locally and does not send the wardrobe back to a language model.

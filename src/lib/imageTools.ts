@@ -374,9 +374,9 @@ function labToSrgb(lab: Lab): [number, number, number] {
   const x = inv(fx) * 0.95047;
   const y = inv(fy);
   const z = inv(fz) * 1.08883;
-  let rl = x * 3.2406 + y * -1.5372 + z * -0.4986;
-  let gl = x * -0.9689 + y * 1.8758 + z * 0.0415;
-  let bl = x * 0.0557 + y * -0.204 + z * 1.057;
+  const rl = x * 3.2406 + y * -1.5372 + z * -0.4986;
+  const gl = x * -0.9689 + y * 1.8758 + z * 0.0415;
+  const bl = x * 0.0557 + y * -0.204 + z * 1.057;
   const gamma = (c: number) => {
     c = Math.max(0, Math.min(1, c));
     return c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
